@@ -2,3 +2,5 @@ orig/
 test/shots/
 *.zip
 *.log
+new/public/uploads/
+dist/

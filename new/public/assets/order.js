@@ -1,22 +1,30 @@
 'use strict';
 const $=s=>document.querySelector(s);
 const app=$('#app'),sheet=$('#sheet'),sheetBody=$('#sheet-body'),toastEl=$('#toast');
+// The CSP (style-src 'self') ignores style="" attributes in markup; re-apply them through CSSOM, which CSP allows.
+const cssom=n=>{if(n.nodeType!==1)return;if(n.hasAttribute('style'))n.style.cssText=n.getAttribute('style');n.querySelectorAll('[style]').forEach(e=>{e.style.cssText=e.getAttribute('style')})};
+new MutationObserver(ms=>{for(const m of ms)m.addedNodes.forEach(cssom)}).observe(document.documentElement,{childList:true,subtree:true});
 const store={
  get(k,d){try{const v=localStorage.getItem(k);return v==null?d:JSON.parse(v)}catch{return d}},
  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
 };
 const ALLERGENS={gluten:['Gluten','Gluten','الغلوتين'],crustaceans:['Crustacés','Crustaceans','القشريات'],eggs:['Œufs','Eggs','البيض'],fish:['Poisson','Fish','السمك'],peanuts:['Arachides','Peanuts','الفول السوداني'],soy:['Soja','Soy','الصويا'],milk:['Lait','Milk','الحليب'],nuts:['Fruits à coque','Nuts','المكسرات'],celery:['Céleri','Celery','الكرفس'],mustard:['Moutarde','Mustard','الخردل'],sesame:['Sésame','Sesame','السمسم'],sulphites:['Sulfites','Sulphites','الكبريتيت'],lupin:['Lupin','Lupin','الترمس'],molluscs:['Mollusques','Molluscs','الرخويات']};
+// Interface strings for es/de/zh live in order-i18n.js, keyed by the English text; menu content falls back to French.
+const LANGS={fr:['Français','fr-MA'],en:['English','en-GB'],ar:['العربية','ar-MA'],es:['Español','es-ES'],de:['Deutsch','de-DE'],zh:['中文','zh-CN']};
+const T=window.APS_I18N||{};
 const STEPS=['new','confirmed','preparing','ready','served'];
 const FINAL=['served','cancelled'];
+// Served orders keep updating until they are paid, so the guest can rate the meal.
+const done=o=>o.order&&(o.order.status==='cancelled'||(o.order.status==='served'&&o.order.payment_status!=='pending'));
 const ORDER_TTL=12*3600*1000;
 
-let csrf='',data=null,lang=store.get('aps-order-lang',null),cart=[],orders=[],view='menu',current=null,query='',pollTimer=null,lastSync=0,personal=false,people=2;
+let csrf='',data=null,lang=LANGS[store.get('aps-order-lang',null)]?store.get('aps-order-lang',null):null,cart=[],orders=[],view='menu',current=null,query='',pollTimer=null,lastSync=0,personal=false,people=2;
 let allergyFilter=store.get('aps-order-allergies',[]).filter(a=>ALLERGENS[a]),hideConflicts=!!store.get('aps-order-hide',false);
 const callCooldown={};
 
 const h=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const tr=(fr,en,ar)=>lang==='ar'?(ar||fr):lang==='en'?(en||fr):fr;
-const locale=()=>lang==='ar'?'ar-MA':lang==='en'?'en-GB':'fr-MA';
+const tr=(fr,en,ar)=>lang==='ar'?(ar||fr):lang==='en'?(en||fr):lang==='fr'||!lang?fr:(T[lang]?.[en]||en||fr);
+const locale=()=>LANGS[lang]?.[1]||'fr-MA';
 const money=(n,c)=>new Intl.NumberFormat(locale(),{style:'currency',currency:c||data?.restaurant?.currency||'MAD'}).format((+n||0)/100);
 const svg=p=>`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I={
@@ -25,7 +33,8 @@ const I={
  receipt:svg('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>'),check:svg('<path d="m5 12 5 5 9-10"/>'),
  shield:svg('<path d="M12 3 5 6v6c0 4 3 7 7 9 4-2 7-5 7-9V6z"/><path d="M9 12h6"/>'),bag:svg('<path d="M5 8h14l-1 12H6z"/><path d="M9 8a3 3 0 0 1 6 0"/>'),
  back:svg('<path d="M15 6l-6 6 6 6"/>'),qr:svg('<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z"/><path d="M14 14h2v2h-2zM18 18h2v2h-2zM14 18h2M18 14h2"/>'),
- dish:svg('<path d="M3 17h18M5 17a7 7 0 0 1 14 0M12 7V5"/>'),spark:svg('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/>')
+ dish:svg('<path d="M3 17h18M5 17a7 7 0 0 1 14 0M12 7V5"/>'),globe:svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
+ star:'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="m12 2.8 2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3-4.6-4.4 6.3-.9z"/></svg>',ext:svg('<path d="M14 4h6v6M20 4l-9 9M18 14v6H4V6h6"/>'),spark:svg('<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/>')
 };
 const ERR={validation:['Vérifiez les informations.','Check the information.','تحقق من المعلومات.'],orders_closed:['Le restaurant ne prend pas de commandes en ce moment.','The restaurant is not taking orders right now.','المطعم لا يستقبل الطلبات حاليًا.'],unavailable_item:['Un plat de votre panier n’est plus disponible. Retirez-le puis réessayez.','A dish in your basket is no longer available. Remove it and try again.','أحد الأطباق لم يعد متاحًا. احذفه وحاول مجددًا.'],table:['Ce QR code de table n’est plus valide. Demandez-en un nouveau à l’équipe.','This table QR code is no longer valid. Ask the staff for a new one.','رمز الطاولة لم يعد صالحًا. اطلب رمزًا جديدًا من الطاقم.'],rate:['Trop de demandes. Réessayez dans quelques minutes.','Too many requests. Try again in a few minutes.','طلبات كثيرة. حاول بعد دقائق.'],not_found:['Ce menu n’est pas disponible.','This menu is not available.','هذه القائمة غير متاحة.'],csrf:['La page a expiré. Rechargez-la.','This page expired. Reload it.','انتهت صلاحية الصفحة. أعد تحميلها.'],offline:['Pas de connexion. Vérifiez le Wi-Fi puis réessayez.','No connection. Check the Wi-Fi and try again.','لا يوجد اتصال. تحقق من الشبكة وحاول مجددًا.'],unavailable:['Service momentanément indisponible. Réessayez dans un instant.','Service temporarily unavailable. Try again in a moment.','الخدمة غير متاحة مؤقتًا. حاول بعد قليل.']};
 const msg=e=>tr(...(ERR[e]||ERR.unavailable));
@@ -43,8 +52,8 @@ const saveCart=()=>store.set(cartKey,cart);
 function loadOrders(){const now=Date.now();orders=store.get(ordersKey,[]).filter(o=>o&&o.id&&o.token&&now-o.at<ORDER_TTL);store.set(ordersKey,orders.map(({id,token,at})=>({id,token,at})))}
 const saveOrders=()=>store.set(ordersKey,orders.map(({id,token,at})=>({id,token,at})));
 
-const names=x=>tr(x.name_fr,x.name_en,x.name_ar);
-const desc=x=>tr(x.description_fr,x.description_en,x.description_ar);
+const names=x=>x['name_'+lang]||x.name_fr;
+const desc=x=>x['description_'+lang]||x.description_fr;
 function allergensOf(i){try{const a=JSON.parse(i.allergens||'[]');return Array.isArray(a)?a.filter(x=>ALLERGENS[x]):[]}catch{return[]}}
 const conflict=i=>allergensOf(i).some(a=>allergyFilter.includes(a));
 const item=id=>data.items.find(i=>i.id==id);
@@ -54,15 +63,33 @@ const qtyOf=id=>cart.filter(l=>l.item_id==id).reduce((n,l)=>n+l.quantity,0);
 const count=()=>cart.reduce((n,l)=>n+l.quantity,0);
 function totals(){const sub=cart.reduce((s,l)=>s+(+(item(l.item_id)?.price||0))*l.quantity,0),r=data.restaurant;const tax=Math.floor((sub*r.tax_rate+5000)/10000),service=Math.floor((sub*r.service_rate+5000)/10000);return{sub,tax,service,total:sub+tax+service}}
 function setLangAttrs(){document.documentElement.lang=lang;document.documentElement.dir=lang==='ar'?'rtl':'ltr'}
-const langSwitch=()=>`<div class="langs" role="group" aria-label="Langue / Language">${['fr','en','ar'].map(x=>`<button data-lang="${x}" aria-pressed="${lang===x}">${x==='ar'?'ع':x.toUpperCase()}</button>`).join('')}</div>`;
-const topbar=()=>`<header class="topbar"><div class="wrap"><span class="mark">APS<i>.</i> ORDER</span>${langSwitch()}</div></header>`;
+/* Flags drawn inline (emoji flags do not render on Windows). 3:2 frame, sliced to fit. */
+function star(cx,cy,r,rot=0){let p='';for(let i=0;i<10;i++){const a=(rot-90+i*36)*Math.PI/180,q=i%2?r*.382:r;p+=(i?'L':'M')+(cx+q*Math.cos(a)).toFixed(2)+','+(cy+q*Math.sin(a)).toFixed(2)}return p+'Z'}
+const FLAGS={
+ fr:'<rect width="30" height="20" fill="#fff"/><rect width="10" height="20" fill="#002395"/><rect x="20" width="10" height="20" fill="#ED2939"/>',
+ en:'<svg viewBox="0 0 60 30" width="30" height="20" preserveAspectRatio="xMidYMid slice"><rect width="60" height="30" fill="#012169"/><path d="M0 0l60 30M60 0 0 30" stroke="#fff" stroke-width="6"/><path d="M0 0l60 30M60 0 0 30" stroke="#C8102E" stroke-width="2"/><path d="M30 0v30M0 15h60" stroke="#fff" stroke-width="10"/><path d="M30 0v30M0 15h60" stroke="#C8102E" stroke-width="6"/></svg>',
+ ar:`<rect width="30" height="20" fill="#C1272D"/><path d="M15 5.2 17.82 13.88 10.43 8.52H19.57L12.18 13.88Z" fill="none" stroke="#006233" stroke-width=".9" stroke-linejoin="round"/>`,
+ es:'<rect width="30" height="20" fill="#AA151B"/><rect y="5" width="30" height="10" fill="#F1BF00"/>',
+ de:'<rect width="30" height="20" fill="#000"/><rect y="6.67" width="30" height="6.67" fill="#DD0000"/><rect y="13.33" width="30" height="6.67" fill="#FFCE00"/>',
+ zh:`<rect width="30" height="20" fill="#EE1C25"/><g fill="#FFDE00"><path d="${star(5,5,3)}"/><path d="${star(10,2,1,23)}"/><path d="${star(12,4,1,46)}"/><path d="${star(12,7,1,70)}"/><path d="${star(10,9,1,21)}"/></g>`};
+const flag=l=>`<svg class="flag" viewBox="0 0 30 20" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${FLAGS[l]||''}</svg>`;
+const offered=()=>(data?.restaurant?.languages||['fr','en','ar']).filter(l=>LANGS[l]);
+const langSwitch=()=>offered().length>1||!data?`<button class="lang-btn" data-action="languages" aria-label="${tr('Langue','Language','اللغة')} · ${h(LANGS[lang]?.[0]||'')}">${flag(lang)}<span>${h(LANGS[lang]?.[0]||'')}</span></button>`:'';
+const topbar=()=>`<header class="topbar"><div class="wrap">${data?.restaurant?.logo_path?`<img class="top-logo" src="${h(data.restaurant.logo_path)}" alt="${h(data.restaurant.name)}">`:'<span class="mark">APS<i>.</i> ORDER</span>'}${langSwitch()}</div></header>`;
+function langButtons(){return`<div class="lang-grid">${(data?offered():Object.keys(LANGS)).map(l=>`<button data-lang="${l}" lang="${l}" dir="${l==='ar'?'rtl':'ltr'}" aria-pressed="${lang===l}">${flag(l)}<span>${h(LANGS[l][0])}</span></button>`).join('')}</div>`}
+const WELCOME={fr:'Bienvenue',en:'Welcome',ar:'مرحبًا',es:'Bienvenido',de:'Willkommen',zh:'欢迎'};
+/* First screen after the QR scan: the guest picks a language, then the menu opens. */
+function renderPicker(){
+ const r=data.restaurant;document.documentElement.lang=lang||r.default_language||'fr';document.documentElement.dir='ltr';document.title=r.name+' · APS Order';
+ app.innerHTML=`<main id="main" class="picker pattern"><div class="picker-card">${r.logo_path?`<img class="picker-logo" src="${h(r.logo_path)}" alt="">`:''}<h1>${h(r.name)}</h1>${data.table?`<span class="pill table">${h(tr('Table','Table','طاولة'))} ${h(data.table.label)}</span>`:''}<p class="picker-hello">${offered().map(l=>`<span lang="${l}">${h(WELCOME[l])}</span>`).join('<i>·</i>')}</p>${langButtons()}</div><p class="picker-foot">APS<span>.</span> Order</p></main>`;
+}
 const statusLabel=s=>({new:tr('Commande reçue','Order received','تم استلام الطلب'),confirmed:tr('Confirmée','Confirmed','تم التأكيد'),preparing:tr('En préparation','Being prepared','قيد التحضير'),ready:tr('Prête','Ready','جاهز'),served:tr('Servie · bon appétit','Served · enjoy','تم التقديم · بالهناء'),cancelled:tr('Annulée','Cancelled','ملغي')}[s]||s);
 
 /* ---------- Landing (no restaurant in the link) ---------- */
 function renderLanding(){
  setLangAttrs();document.title='APS Order';
  app.innerHTML=`<div class="landing">${topbar()}<div><section class="landing-hero pattern"><div class="wrap"><span class="eyebrow">${tr('Commande à table','Order at your table','الطلب من الطاولة')}</span><h1>${tr('Scannez. Choisissez. On s’occupe du reste.','Scan. Choose. We handle the rest.','امسح. اختر. ونحن نتكفل بالباقي.')}</h1><p>${tr('Pour voir le menu, scannez le QR code posé sur votre table avec l’appareil photo de votre téléphone.','To see the menu, scan the QR code on your table with your phone camera.','لعرض القائمة، امسح رمز QR الموجود على طاولتك بكاميرا هاتفك.')}</p></div></section>
- <main id="main" class="wrap"><div class="how"><div><span class="n">1</span><strong>${tr('Scannez','Scan','امسح')}</strong><span>${tr('Le QR code de votre table ouvre son menu.','Your table’s QR code opens its menu.','رمز طاولتك يفتح قائمتها.')}</span></div><div><span class="n">2</span><strong>${tr('Commandez','Order','اطلب')}</strong><span>${tr('En français, anglais ou arabe, avec vos allergies signalées.','In French, English or Arabic, with your allergies flagged.','بالفرنسية أو الإنجليزية أو العربية مع الإشارة إلى الحساسية.')}</span></div><div><span class="n">3</span><strong>${tr('Suivez','Follow','تابع')}</strong><span>${tr('Votre commande s’actualise en direct jusqu’au service.','Your order updates live until it is served.','يتم تحديث طلبك مباشرة حتى التقديم.')}</span></div></div>
+ <main id="main" class="wrap"><div class="how"><div><span class="n">1</span><strong>${tr('Scannez','Scan','امسح')}</strong><span>${tr('Le QR code de votre table ouvre son menu.','Your table’s QR code opens its menu.','رمز طاولتك يفتح قائمتها.')}</span></div><div><span class="n">2</span><strong>${tr('Commandez','Order','اطلب')}</strong><span>${tr('En six langues, avec vos allergies signalées.','In six languages, with your allergies flagged.','بست لغات مع الإشارة إلى الحساسية.')}</span></div><div><span class="n">3</span><strong>${tr('Suivez','Follow','تابع')}</strong><span>${tr('Votre commande s’actualise en direct jusqu’au service.','Your order updates live until it is served.','يتم تحديث طلبك مباشرة حتى التقديم.')}</span></div></div>
  ${orders.length?`<button class="primary" data-action="track">${I.receipt} ${tr('Suivre ma commande','Track my order','تتبع طلبي')}</button>`:''}</main></div>
  <footer class="wrap landing-foot"><span>APS Order · Rabat</span><span>${tr('Restaurateur ?','Restaurant owner?','صاحب مطعم؟')} <a href="/staff">${tr('Espace équipe','Team workspace','مساحة الفريق')} →</a> · contact@apservices.vip</span></footer></div>`;
 }
@@ -111,9 +138,19 @@ function renderList(){
  list.innerHTML=html;
 }
 function activeOrder(){return orders.find(o=>o.order&&!FINAL.includes(o.order.status))}
+const rateable=o=>o?.order&&o.order.status==='served'&&o.order.payment_status==='paid'&&o.order.rating==null;
+const reviewUrl=o=>{const u=o?.order?.google_review_url||'';return/^https:\/\//i.test(u)&&!/PLACEHOLDER/i.test(u)?u:''};
 function renderDock(){
  const d=$('#dock-inner');if(!d)return;const live=activeOrder(),n=count();
- d.innerHTML=`${live?`<button class="live-chip" data-action="track" data-id="${h(live.id)}"><span class="dot"></span>${tr('Commande','Order','الطلب')} #${h(live.id)} · ${h(statusLabel(live.order.status))}</button>`:''}${n?`<button class="cart-bar" data-action="cart"><span>${I.bag} ${n} · ${tr('Voir la commande','View order','عرض الطلب')}</span><span class="total">${money(totals().total)}</span></button>`:''}`;
+ const rate=!live&&orders.find(rateable);
+ d.innerHTML=`${live?`<button class="live-chip" data-action="track" data-id="${h(live.id)}"><span class="dot"></span>${tr('Commande','Order','الطلب')} #${h(live.id)} · ${h(statusLabel(live.order.status))}</button>`:''}${rate?`<button class="live-chip rate-chip" data-action="rate-open" data-id="${h(rate.id)}">${I.star}${tr('Notez votre repas','Rate your meal','قيّم وجبتك')}</button>`:''}${n?`<button class="cart-bar" data-action="cart"><span>${I.bag} ${n} · ${tr('Voir la commande','View order','عرض الطلب')}</span><span class="total">${money(totals().total)}</span></button>`:''}`;
+}
+let rating=0;
+function paintStars(){document.querySelectorAll('[data-star]').forEach(b=>b.setAttribute('aria-checked',String(+b.dataset.star<=rating)));const b=$('#rate-send');if(b)b.disabled=!rating;const l=$('#rate-label');if(l)l.textContent=rating?[tr('Décevant','Disappointing','مخيب'),tr('Moyen','Average','متوسط'),tr('Bien','Good','جيد'),tr('Très bien','Very good','جيد جدًا'),tr('Excellent','Excellent','ممتاز')][rating-1]:''}
+function ratingCard(o){
+ const url=reviewUrl(o),g=url?`<a class="primary google" href="${h(url)}" target="_blank" rel="noopener noreferrer">${I.ext} ${tr('Laisser un avis sur Google','Leave a Google review','اترك تقييمًا على Google')}</a>`:'';
+ if(o.order.rating!=null)return`<section class="rate done"><div class="stars static" aria-label="${o.order.rating}/5">${[1,2,3,4,5].map(n=>`<span class="${n<=o.order.rating?'on':''}">${I.star}</span>`).join('')}</div><h2>${tr('Merci pour votre avis !','Thank you for your feedback!','شكرًا على رأيك!')}</h2><p>${o.order.rating>=4?tr('Ravi que le repas vous ait plu. Un mot sur Google aide beaucoup le restaurant.','Glad you enjoyed it. A few words on Google really help the restaurant.','سعداء أن الوجبة أعجبتك. كلمة على Google تساعد المطعم كثيرًا.'):tr('L’équipe lira votre retour. Vous pouvez aussi partager votre avis publiquement.','The team will read your feedback. You can also share it publicly.','سيقرأ الفريق ملاحظتك. يمكنك أيضًا مشاركة رأيك علنًا.')}</p>${g}</section>`;
+ return`<section class="rate" id="rate"><h2>${tr('Comment était votre repas ?','How was your meal?','كيف كانت وجبتك؟')}</h2><p>${tr('Votre note va directement à l’équipe.','Your rating goes straight to the team.','تقييمك يصل مباشرة إلى الفريق.')}</p><div class="stars" role="radiogroup" aria-label="${tr('Note','Rating','التقييم')}">${[1,2,3,4,5].map(n=>`<button type="button" role="radio" data-star="${n}" aria-checked="${n<=rating}" aria-label="${n}/5">${I.star}</button>`).join('')}</div><span class="rate-label" id="rate-label"></span><form id="rate-form" data-id="${h(o.id)}" style="display:grid;gap:12px;width:100%"><textarea name="comment" maxlength="500" rows="2" aria-label="${tr('Commentaire (facultatif)','Comment (optional)','تعليق (اختياري)')}" placeholder="${tr('Un commentaire ? (facultatif)','Any comment? (optional)','أي تعليق؟ (اختياري)')}"></textarea><button class="primary" id="rate-send" ${rating?'':'disabled'}>${tr('Envoyer ma note','Send my rating','إرسال التقييم')}</button></form></section>`;
 }
 let spyObs=null;
 function spy(){
@@ -162,7 +199,7 @@ function openCart(){
   <div class="grid2"><div class="field"><label for="c-guests">${tr('Personnes','Guests','الأشخاص')}</label><select id="c-guests" name="guest_count">${Array.from({length:30},(_,i)=>`<option value="${i+1}" ${people===i+1?'selected':''}>${i+1}</option>`).join('')}</select></div><div class="field"><label for="c-name">${tr('Votre prénom (facultatif)','Your name (optional)','اسمك (اختياري)')}</label><input id="c-name" name="customer_name" maxlength="100" autocomplete="given-name"></div></div>
   <div class="field"><label for="c-note">${tr('Note pour la cuisine (facultatif)','Note for the kitchen (optional)','ملاحظة للمطبخ (اختياري)')}</label><textarea id="c-note" name="customer_note" maxlength="1000"></textarea></div>
   <div class="field"><span class="label">${tr('Allergies transmises','Allergies sent','الحساسية المرسلة')}</span><div class="tags" style="align-items:center">${allergyFilter.length?allergyFilter.map(a=>`<span class="tag warn">${h(tr(...ALLERGENS[a]))}</span>`).join(''):`<span class="tag">${tr('Aucune','None','لا شيء')}</span>`}<button type="button" class="chip-btn" style="padding:4px 12px;box-shadow:none" data-action="allergies-from-cart">${tr('Modifier','Edit','تعديل')}</button></div></div>
-  <div class="summary"><div><span>${tr('Sous-total','Subtotal','المجموع الفرعي')}</span><span>${money(x.sub)}</span></div>${x.tax?`<div><span>${tr('Taxe','Tax','الضريبة')} ${r.tax_rate/100}%</span><span>${money(x.tax)}</span></div>`:''}${x.service?`<div><span>${tr('Service','Service','الخدمة')} ${r.service_rate/100}%</span><span>${money(x.service)}</span></div>`:''}<div class="grand"><span>Total</span><span>${money(x.total)}</span></div></div>
+  <div class="summary"><div><span>${tr('Sous-total','Subtotal','المجموع الفرعي')}</span><span>${money(x.sub)}</span></div>${x.tax?`<div><span>${tr('Taxe','Tax','الضريبة')} ${r.tax_rate/100}%</span><span>${money(x.tax)}</span></div>`:''}${x.service?`<div><span>${tr('Service','Service','الخدمة')} ${r.service_rate/100}%</span><span>${money(x.service)}</span></div>`:''}<div class="grand"><span>${tr('Total','Total','المجموع')}</span><span>${money(x.total)}</span></div></div>
   <p class="notice">${tr('Vous réglez sur place. Le paiement en ligne arrivera bientôt.','You pay on site. Online payment is coming soon.','الدفع في المكان. الدفع الإلكتروني قريبًا.')}</p>
   <button class="primary" ${open()?'':'disabled'}>${I.check} ${tr('Envoyer la commande','Send order','إرسال الطلب')} · ${money(x.total)}</button>
  </form>`);
@@ -178,24 +215,26 @@ function renderTrack(){
  const stepText=s=>({new:tr('Reçue','Received','مستلم'),confirmed:tr('Confirmée','Confirmed','مؤكد'),preparing:tr('En cuisine','In the kitchen','في المطبخ'),ready:tr('Prête','Ready','جاهز'),served:tr('Servie','Served','تم التقديم')}[s]);
  app.innerHTML=`${topbar()}<main id="main" class="wrap track">
  ${orders.length>1?`<div class="order-switch">${orders.map(x=>`<button data-switch="${h(x.id)}" aria-current="${x.id===current}">#${h(x.id)}</button>`).join('')}</div>`:''}
- <article class="ticket"><header class="ticket-head pattern ${st==='cancelled'?'cancelled':''}"><span class="code">${tr('COMMANDE','ORDER','الطلب')} #${h(o.id)}${o.order?.table_label?' · '+tr('TABLE','TABLE','طاولة')+' '+h(o.order.table_label):''}</span><h1>${h(statusLabel(st))}</h1><p>${h(sub)}</p></header><div class="perforation"></div>
+ ${o.order&&(rateable(o)||o.order.rating!=null)?ratingCard(o):''}
+ <article class="ticket"><header class="ticket-head pattern ${st==='cancelled'?'cancelled':''}">${o.order?.restaurant_name?`<span class="code">${h(o.order.restaurant_name)}</span>`:''}<span class="code">${tr('COMMANDE','ORDER','الطلب')} #${h(o.id)}${o.order?.table_label?' · '+tr('TABLE','TABLE','طاولة')+' '+h(o.order.table_label):''}</span><h1>${h(statusLabel(st))}</h1><p>${h(sub)}</p></header><div class="perforation"></div>
  ${st!=='cancelled'?`<ol class="steps">${STEPS.map((s,i)=>`<li class="${i<ix||st==='served'?'done':i===ix?'now':''}"><span class="node">${i<ix||st==='served'?I.check:''}</span><div><strong>${stepText(s)}</strong>${i===ix&&st!=='served'?`<small>${tr('En cours','In progress','جارٍ')}</small>`:''}</div></li>`).join('')}</ol>`:''}
- ${o.items?.length?`<div class="ticket-items">${o.items.map(i=>`<div><span>${i.quantity} × ${h(i.item_name)}</span><span>${money(i.unit_price*i.quantity,cur)}</span></div>`).join('')}${+o.order.tax?`<div><span>${tr('Taxe','Tax','الضريبة')}</span><span>${money(o.order.tax,cur)}</span></div>`:''}${+o.order.service?`<div><span>${tr('Service','Service','الخدمة')}</span><span>${money(o.order.service,cur)}</span></div>`:''}<div class="grand"><span>Total</span><span>${money(o.order.total,cur)}</span></div></div>`:''}
+ ${st==='served'&&o.order?.payment_status==='pending'?`<p class="notice" style="margin:0 22px 16px">${tr('Une fois l’addition réglée, vous pourrez noter votre repas ici.','Once the bill is settled you can rate your meal here.','بعد دفع الفاتورة يمكنك تقييم وجبتك هنا.')}</p>`:''}
+ ${o.items?.length?`<div class="ticket-items">${o.items.map(i=>`<div><span>${i.quantity} × ${h(i.item_name)}</span><span>${money(i.unit_price*i.quantity,cur)}</span></div>`).join('')}${+o.order.tax?`<div><span>${tr('Taxe','Tax','الضريبة')}</span><span>${money(o.order.tax,cur)}</span></div>`:''}${+o.order.service?`<div><span>${tr('Service','Service','الخدمة')}</span><span>${money(o.order.service,cur)}</span></div>`:''}<div class="grand"><span>${tr('Total','Total','المجموع')}</span><span>${money(o.order.total,cur)}</span></div></div>`:''}
  </article>
  ${data?`<button class="primary" data-action="menu">${I.plus} ${tr('Commander autre chose','Order something else','اطلب شيئًا آخر')}</button>`:''}
  ${data?.table?`<div class="grid2"><button class="secondary" data-call="waiter">${I.bell}${tr('Appeler un serveur','Call a waiter','نداء النادل')}</button><button class="secondary" data-call="bill">${I.receipt}${tr('L’addition','The bill','الفاتورة')}</button></div>`:''}
- <p class="refresh-note" id="sync-note">${FINAL.includes(st)?'':tr('Mise à jour automatique','Updates automatically','تحديث تلقائي')}</p>
+ <p class="refresh-note" id="sync-note">${done(o)?'':tr('Mise à jour automatique','Updates automatically','تحديث تلقائي')}</p>
  </main>`;
 }
 async function sync(force=false){
  clearTimeout(pollTimer);
- const due=orders.filter(o=>!o.order||!FINAL.includes(o.order.status)).slice(0,4);
+ const due=orders.filter(o=>!done(o)).slice(0,4);
  if(due.length&&!document.hidden){
   await Promise.all(due.map(async o=>{try{const r=await api('order-status',undefined,'&id='+encodeURIComponent(o.id)+'&token='+encodeURIComponent(o.token));const was=o.order?.status;o.order=r.order;o.items=r.items;if(was&&was!==r.order.status&&r.order.status==='ready'&&navigator.vibrate)navigator.vibrate([120,60,120])}catch(e){if(e.message==='not_found'){orders=orders.filter(x=>x!==o);saveOrders()}}}));
   lastSync=Date.now();
-  if(view==='track')renderTrack();else renderDock();
+  if(view==='track'){const typing=document.activeElement?.closest?.('#rate-form');if(!typing)renderTrack()}else renderDock();
  }
- const live=orders.some(o=>!o.order||!FINAL.includes(o.order.status));
+ const live=orders.some(o=>!done(o));
  if(live)pollTimer=setTimeout(sync,view==='track'?8000:20000);
 }
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)sync()});
@@ -209,8 +248,9 @@ async function callStaff(kind,btn){
 
 /* ---------- Events ---------- */
 document.addEventListener('click',e=>{
- const x=e.target.closest('[data-lang],[data-inc],[data-dec],[data-action],[data-cat],[data-line],[data-call],[data-switch],[data-add-detail],[data-dish]');if(!x)return;
- if(x.dataset.lang){lang=x.dataset.lang;store.set('aps-order-lang',lang);closeSheet();return view==='track'?renderTrack():data?renderMenu():renderLanding()}
+ const x=e.target.closest('[data-star],[data-lang],[data-inc],[data-dec],[data-action],[data-cat],[data-line],[data-call],[data-switch],[data-add-detail],[data-dish]');if(!x)return;
+ if(x.dataset.lang){lang=x.dataset.lang;store.set('aps-order-lang',lang);closeSheet();if(next&&!session('aps-order-picked')){session('aps-order-picked','1');window.scrollTo(0,0);return next()}return view==='track'?renderTrack():data?renderMenu():renderLanding()}
+ if(x.dataset.star){rating=+x.dataset.star;return paintStars()}
  if(x.dataset.inc){addItem(x.dataset.inc);refreshMenu();return}
  if(x.dataset.dec){removeOne(x.dataset.dec);refreshMenu();return}
  if(x.dataset.addDetail){const n=+($('#detail-q')?.textContent||1),note=($('#detail-note')?.value||'').trim().slice(0,300);addItem(x.dataset.addDetail,n,note);closeSheet();refreshMenu();toast(tr('Ajouté à votre commande.','Added to your order.','أضيف إلى طلبك.'));return}
@@ -220,6 +260,8 @@ document.addEventListener('click',e=>{
  if(x.dataset.cat){const s=document.querySelector(`[data-section="${x.dataset.cat}"]`);s?.scrollIntoView({behavior:'smooth',block:'start'});return}
  const a=x.dataset.action;
  if(a==='close')return closeSheet();
+ if(a==='languages')return openSheet(tr('Langue','Language','اللغة'),langButtons());
+ if(a==='rate-open'){current=x.dataset.id;return track(current)}
  if(a==='allergies')return openAllergies(false);
  if(a==='allergies-from-cart')return openAllergies(true);
  if(a==='cart')return openCart();
@@ -240,6 +282,12 @@ document.addEventListener('change',e=>{
 document.addEventListener('submit',async e=>{
  e.preventDefault();const f=e.target;
  if(f.id==='allergy-form'){const fd=new FormData(f);allergyFilter=fd.getAll('a').filter(a=>ALLERGENS[a]);hideConflicts=fd.has('hide');store.set('aps-order-allergies',allergyFilter);store.set('aps-order-hide',hideConflicts);if(f.dataset.back){openCart()}else closeSheet();renderMenu();return}
+ if(f.id==='rate-form'){
+  const o=orders.find(x=>x.id===f.dataset.id),b=$('#rate-send');if(!o||!rating)return;b.disabled=true;
+  try{const r=await api('order-rate',{id:o.id,token:o.token,rating,comment:(new FormData(f).get('comment')||'').trim()});o.order.rating=rating;if(r.google_review_url)o.order.google_review_url=r.google_review_url;rating=0;renderTrack();$('#rate')?.scrollIntoView?.({block:'nearest'})}
+  catch(x){toast(x.message==='conflict'?tr('Cette commande a déjà été notée.','This order was already rated.','تم تقييم هذا الطلب مسبقًا.'):msg(x.message),true);b.disabled=false}
+  return;
+ }
  if(f.id==='checkout'){
   const b=e.submitter||f.querySelector('.primary');b.disabled=true;
   try{
@@ -253,13 +301,20 @@ document.addEventListener('submit',async e=>{
 });
 
 /* ---------- Boot ---------- */
+const session=(k,v)=>{try{if(v===undefined)return sessionStorage.getItem(k);sessionStorage.setItem(k,v)}catch{}};
+// Reception hands guests a QR to /r/<slug>/#o=<order>.<token> so they can follow and rate an order they did not place themselves.
+const hashOrder=(()=>{const m=location.hash.match(/^#o=([A-F0-9]{8})\.([a-f0-9]{48})$/);if(!m)return null;history.replaceState(null,'',location.pathname+location.search);return{id:m[1],token:m[2]}})();
+let next=null;
 (async()=>{
  try{await api('session')}catch{}
  loadOrders();
  if(!P.slug){lang=lang||'fr';renderLanding();if(orders.length)sync();return}
  try{data=await api('menu',undefined,'&slug='+encodeURIComponent(P.slug)+'&table='+encodeURIComponent(P.table))}
  catch(e){lang=lang||'fr';if(orders.length){view='track';current=orders[0].id;renderTrack();sync(true);return}renderError(e.message);return}
- lang=lang||(['fr','en','ar'].includes(data.restaurant.default_language)?data.restaurant.default_language:'fr');
+ lang=lang&&offered().includes(lang)?lang:offered().includes(data.restaurant.default_language)?data.restaurant.default_language:offered()[0];
  cart=store.get(cartKey,[]).filter(l=>l&&item(l.item_id)&&l.quantity>0).map(l=>({...l,quantity:Math.min(20,+l.quantity),key:l.key||l.item_id+'|'+(l.note||'')}));
- renderMenu();sync();
+ if(hashOrder&&!orders.some(o=>o.id===hashOrder.id))orders.unshift({...hashOrder,at:Date.now()}),saveOrders();
+ next=hashOrder?()=>track(hashOrder.id):()=>{renderMenu();sync()};
+ if(offered().length>1&&!session('aps-order-picked'))return renderPicker();
+ if(!offered().includes(lang))lang=offered()[0];next();
 })();

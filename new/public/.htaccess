@@ -10,19 +10,20 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^r/ index.html [L]
 RewriteRule ^staff/?$ staff.html [L]
+RewriteRule ^screen/?$ screen.html [L]
 </IfModule>
 <IfModule mod_headers.c>
 Header always set X-Content-Type-Options "nosniff"
 Header always set X-Frame-Options "DENY"
 Header always set Referrer-Policy "strict-origin-when-cross-origin"
 Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
-Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; img-src 'self' data:; connect-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 Header always set X-Robots-Tag "noindex, nofollow"
 Header always set Strict-Transport-Security "max-age=31536000"
-<FilesMatch "\.(css|js|svg|webp|woff2)$">
+<FilesMatch "\.(css|js|svg|webp|woff2|mp4|webm)$">
 Header set Cache-Control "public, max-age=604800"
 </FilesMatch>
-<FilesMatch "\.html$">
+<FilesMatch "(\.html|screen-sw\.js)$">
 Header set Cache-Control "no-cache"
 </FilesMatch>
 </IfModule>

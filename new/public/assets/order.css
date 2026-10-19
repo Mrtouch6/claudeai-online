@@ -8,7 +8,7 @@
   --danger:#B23E37;--danger-soft:#FBE7E5;--ok:#1C8456;
   --shadow:0 1px 2px rgb(18 34 30/.06),0 8px 24px -12px rgb(18 34 30/.18);
   --display:"Bricolage Grotesque","Readex Pro",ui-sans-serif,system-ui,sans-serif;
-  --body:"Readex Pro",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;
+  --body:"Readex Pro",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Tahoma,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
   --r-sm:10px;--r:16px;--r-lg:24px;
   color-scheme:light;
 }
@@ -57,6 +57,43 @@ p{margin:0}
 .langs{display:flex;background:rgb(0 0 0/.16);border-radius:999px;padding:3px}
 .langs button{border:0;background:transparent;color:inherit;font-size:12px;font-weight:600;letter-spacing:.06em;padding:6px 11px;border-radius:999px;min-width:40px}
 .langs button[aria-pressed="true"]{background:var(--on-hero);color:var(--hero)}
+
+/* Language: one button in the bar, a flag grid in the picker and the sheet */
+.lang-btn{display:inline-flex;align-items:center;gap:8px;border:0;background:rgb(0 0 0/.16);color:inherit;border-radius:999px;padding:5px 12px 5px 6px;font-size:13px;font-weight:600}
+.lang-btn .flag{width:24px;height:16px}
+.flag{width:30px;height:20px;border-radius:3px;flex:none;box-shadow:0 0 0 1px rgb(0 0 0/.12);display:block}
+.top-logo{height:32px;width:auto;max-width:150px;object-fit:contain;border-radius:6px;background:rgb(255 255 255/.92);padding:3px 6px}
+.lang-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;width:100%}
+.lang-grid button{display:flex;align-items:center;gap:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:var(--r);padding:14px 16px;font-size:16px;font-weight:600;text-align:start;box-shadow:var(--shadow);transition:border-color .15s,transform .1s}
+.lang-grid button:hover{border-color:var(--brand)}
+.lang-grid button:active{transform:scale(.98)}
+.lang-grid button[aria-pressed="true"]{border-color:var(--brand);background:var(--brand-soft);color:var(--brand-ink)}
+.lang-grid .flag{width:36px;height:24px}
+.picker{min-height:100vh;min-height:100dvh;background:var(--hero);color:var(--on-hero);display:grid;align-content:center;justify-items:center;gap:20px;padding:32px max(16px,env(safe-area-inset-left,0px)) calc(24px + env(safe-area-inset-bottom,0px))}
+.picker-card{width:100%;max-width:440px;background:var(--paper);color:var(--ink);border-radius:var(--r-lg);padding:28px 20px 22px;display:grid;gap:16px;justify-items:center;text-align:center;box-shadow:0 30px 60px -24px rgb(0 0 0/.5);animation:rise .3s ease-out}
+.picker-logo{max-height:84px;max-width:200px;width:auto;object-fit:contain}
+.picker-card h1{font-size:clamp(28px,8vw,40px);font-weight:800}
+.picker-hello{color:var(--muted);font-size:14px;display:flex;flex-wrap:wrap;justify-content:center;gap:4px 8px}
+.picker-hello i{font-style:normal;color:var(--saffron)}
+.picker-foot{font:800 13px var(--display);letter-spacing:.08em;opacity:.7}
+.picker-foot span{color:var(--saffron)}
+
+/* Rating after a served and paid order */
+.rate{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow);padding:22px 20px;display:grid;gap:10px;justify-items:center;text-align:center;animation:rise .25s ease-out}
+.rate h2{font-size:24px;font-weight:800}
+.rate p{color:var(--muted);max-width:40ch}
+.stars{display:flex;gap:6px;direction:ltr}
+.stars button,.stars span{border:0;background:none;padding:2px;color:var(--line);display:grid;place-items:center}
+.stars .icon{width:42px;height:42px}
+.stars span .icon{width:26px;height:26px}
+.stars button[aria-checked="true"],.stars span.on{color:var(--saffron)}
+.stars button:hover{transform:scale(1.08)}
+.rate-label{font-weight:600;color:var(--saffron-ink);min-height:1.5em}
+.rate textarea{width:100%;border:1px solid var(--line);background:var(--paper);border-radius:var(--r-sm);padding:11px 12px;outline:0;resize:vertical}
+.rate.done{border-color:color-mix(in srgb,var(--saffron) 50%,var(--line));background:linear-gradient(180deg,var(--saffron-soft),var(--surface) 70%)}
+.primary.google{text-decoration:none;margin-top:6px}
+.rate-chip{border-color:var(--saffron);background:var(--saffron-soft);color:var(--saffron-ink)}
+.rate-chip .icon{color:var(--saffron)}
 
 /* Hero */
 .hero{background:var(--hero);color:var(--on-hero);padding-block:12px 34px;border-radius:0 0 var(--r-lg) var(--r-lg)}

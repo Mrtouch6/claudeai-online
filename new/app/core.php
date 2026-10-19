@@ -1,12 +1,15 @@
 <?php
 declare(strict_types=1); umask(0077);
 const ORIGIN='https://order.apservices.vip';
-const SCHEMA_VERSION=2;
+const SCHEMA_VERSION=3;
 const SESSION_IDLE=1200;      // 20 min without any request
 const SESSION_MAX=50400;      // 14 h: covers a full service day on a kitchen screen
 const BACKUP_KEEP=14;         // daily database snapshots kept in var/backups
 const MFA_REQUIRED=false;     // two-step verification switched off for now; set to true to require it again (saved secrets are kept)
 const PLATFORM_ADMINS=['mohammad@apservices.vip'=>'Mohammad','oussama@apservices.vip'=>'Oussama'];
+const LANGS=['fr','en','ar','es','de','zh'];  // menu content falls back to French when a translation is empty
+const REVIEW_PLACEHOLDER='https://g.page/r/PLACEHOLDER/review';
+const SIGNAGE_QUOTA=1073741824;  // 1 GB of screen media per restaurant
 const ALLERGENS=['gluten','crustaceans','eggs','fish','peanuts','soy','milk','nuts','celery','mustard','sesame','sulphites','lupin','molluscs'];
 
 function local_mode():bool{return getenv('APS_ORDER_ENV')==='test'&&PHP_SAPI==='cli-server'&&in_array($_SERVER['SERVER_ADDR']??'127.0.0.1',['127.0.0.1','::1'],true);}
@@ -21,11 +24,27 @@ function db():PDO{
  $d->exec('PRAGMA foreign_keys=ON;PRAGMA busy_timeout=5000;PRAGMA journal_mode=WAL;');
  // Run the schema only when it changed, not on every request.
  if((int)$d->query('PRAGMA user_version')->fetchColumn()<SCHEMA_VERSION){
-  $d->exec(file_get_contents(__DIR__.'/schema.sql'));
-  foreach(PLATFORM_ADMINS as $email=>$name)q("INSERT OR IGNORE INTO users(email,name,role,created_at)VALUES(?,?,'platform_admin',?)",[$email,$name,time()]);
-  $d->exec('PRAGMA user_version='.SCHEMA_VERSION);
+  $d->exec('BEGIN IMMEDIATE');
+  try{
+   $from=(int)$d->query('PRAGMA user_version')->fetchColumn();
+   if($from<SCHEMA_VERSION){
+    $d->exec(file_get_contents(__DIR__.'/schema.sql'));migrate($d,$from);
+    foreach(PLATFORM_ADMINS as $email=>$name)q("INSERT OR IGNORE INTO users(email,name,role,created_at)VALUES(?,?,'platform_admin',?)",[$email,$name,time()]);
+    $d->exec('PRAGMA user_version='.SCHEMA_VERSION);
+   }
+   $d->exec('COMMIT');
+  }catch(Throwable $e){$d->exec('ROLLBACK');throw $e;}
  }
  @chmod($dir.'/orders.sqlite',0600);return $d;
+}
+// Columns added after a release: CREATE TABLE IF NOT EXISTS leaves existing tables alone, so add what is missing.
+function migrate(PDO $d,int $from):void{
+ if($from>=3)return;
+ $t="TEXT NOT NULL DEFAULT ''";
+ $add=['categories'=>['name_es'=>$t,'name_de'=>$t,'name_zh'=>$t],'items'=>['name_es'=>$t,'name_de'=>$t,'name_zh'=>$t,'description_es'=>$t,'description_de'=>$t,'description_zh'=>$t],'restaurants'=>['google_review_url'=>"TEXT NOT NULL DEFAULT '".REVIEW_PLACEHOLDER."'"],'orders'=>['created_by'=>'INTEGER REFERENCES users(id)','rating'=>'INTEGER','rating_comment'=>$t,'rated_at'=>'INTEGER']];
+ foreach($add as$table=>$cols){$have=array_column($d->query("PRAGMA table_info($table)")->fetchAll(),'name');foreach($cols as$c=>$def)if(!in_array($c,$have,true))$d->exec("ALTER TABLE $table ADD COLUMN $c $def");}
+ // Until v3 every restaurant was saved with exactly fr/en/ar, so widen those to all six languages.
+ $d->exec("UPDATE restaurants SET languages='[\"fr\",\"en\",\"ar\",\"es\",\"de\",\"zh\"]' WHERE languages='[\"fr\",\"en\",\"ar\"]'");
 }
 function q(string $s,array $p=[]):PDOStatement{$x=db()->prepare($s);$x->execute($p);return $x;} function one(string $s,array $p=[]):?array{$r=q($s,$p)->fetch();return$r?:null;}function all(string $s,array $p=[]):array{return q($s,$p)->fetchAll();}
 
@@ -70,5 +89,20 @@ function recovery(int$id):array{$a=[];q('DELETE FROM recovery_codes WHERE user_i
 function mailx(string$to,string$sub,string$body):bool{if(local_mode()){$dir=store_dir().'/outbox';if(!is_dir($dir))mkdir($dir,0700);file_put_contents($dir.'/'.bin2hex(random_bytes(8)).'.json',json_encode(compact('to','sub','body')));return true;}return mail($to,'=?UTF-8?B?'.base64_encode($sub).'?=',chunk_split(base64_encode($body)),['From'=>'APS Order <contact@apservices.vip>','MIME-Version'=>'1.0','Content-Type'=>'text/plain; charset=UTF-8','Content-Transfer-Encoding'=>'base64'],'-fcontact@apservices.vip');}
 function send_link(array$u):bool{$t=bin2hex(random_bytes(32));$now=time();db()->beginTransaction();q('UPDATE tokens SET used_at=? WHERE user_id=? AND used_at IS NULL',[$now,$u['id']]);q('INSERT INTO tokens(user_id,token_hash,expires_at,created_at)VALUES(?,?,?,?)',[$u['id'],hash('sha256',$t),$now+1800,$now]);db()->commit();$url=(local_mode()?'http://127.0.0.1:4190':ORIGIN).'/staff/#activate='.$t;return mailx($u['email'],'APS Order — accès au compte / account access',"Bonjour / Hello ".$u['name'].",\n\nActivez ou réinitialisez votre compte APS Order (lien unique, 30 minutes) :\nActivate or reset your APS Order account (single-use, 30 minutes):\n\n$url\n\nUne application d’authentification est obligatoire. / An authenticator app is required.\n\nAPS Order — ".ORIGIN);}
 function audit(string$e,?array$u=null,string$entity='',?int$id=null):void{q('INSERT INTO audit(user_id,restaurant_id,event,entity,entity_id,created_at)VALUES(?,?,?,?,?,?)',[$u['id']??null,$u['restaurant_id']??null,$e,$entity,$id,time()]);}
-function session_user(bool$required=true):?array{$id=$_SESSION['uid']??null;if(!$id){if($required)fail(401,'auth');return null;}$u=one('SELECT * FROM users WHERE id=?',[$id]);$now=time();if(!$u||!(int)$u['active']||(MFA_REQUIRED&&!$u['mfa_secret'])||$now-($_SESSION['last']??0)>SESSION_IDLE||$now-($_SESSION['created']??0)>SESSION_MAX||(int)$u['session_version']!==($_SESSION['version']??0)){$_SESSION=[];session_regenerate_id(true);$_SESSION['csrf']=bin2hex(random_bytes(32));if($required)fail(401,'auth');return null;}$_SESSION['last']=$now;return$u;}function login_user(array$u):void{session_regenerate_id(true);$_SESSION=['uid'=>(int)$u['id'],'version'=>(int)$u['session_version'],'created'=>time(),'last'=>time(),'csrf'=>bin2hex(random_bytes(32))];audit('login',$u);}function pub(array$u):array{return array_intersect_key($u,array_flip(['id','name','email','role','restaurant_id']));}function platform(array$u):void{if($u['role']!=='platform_admin')fail(403,'forbidden');}function rid(array$u,array$d):int{if($u['role']!=='platform_admin')return(int)$u['restaurant_id'];$id=num($d,'restaurant_id');if(!one('SELECT id FROM restaurants WHERE id=?',[$id]))fail(422,'validation');return$id;}function owns(string$table,int$id,array$u):array{if(!in_array($table,['restaurants','categories','items','dining_tables','orders','service_requests'],true))throw new RuntimeException('table');$r=one("SELECT * FROM $table WHERE id=?",[$id]);$restaurant=$table==='restaurants'?$r['id']??0:$r['restaurant_id']??0;if(!$r||($u['role']!=='platform_admin'&&(int)$restaurant!==(int)$u['restaurant_id']))fail(404,'not_found');return$r;}
+function session_user(bool$required=true):?array{$id=$_SESSION['uid']??null;if(!$id){if($required)fail(401,'auth');return null;}$u=one('SELECT * FROM users WHERE id=?',[$id]);$now=time();if(!$u||!(int)$u['active']||(MFA_REQUIRED&&!$u['mfa_secret'])||$now-($_SESSION['last']??0)>SESSION_IDLE||$now-($_SESSION['created']??0)>SESSION_MAX||(int)$u['session_version']!==($_SESSION['version']??0)){$_SESSION=[];session_regenerate_id(true);$_SESSION['csrf']=bin2hex(random_bytes(32));if($required)fail(401,'auth');return null;}$_SESSION['last']=$now;return$u;}function login_user(array$u):void{session_regenerate_id(true);$_SESSION=['uid'=>(int)$u['id'],'version'=>(int)$u['session_version'],'created'=>time(),'last'=>time(),'csrf'=>bin2hex(random_bytes(32))];audit('login',$u);}function pub(array$u):array{return array_intersect_key($u,array_flip(['id','name','email','role','restaurant_id']));}function platform(array$u):void{if($u['role']!=='platform_admin')fail(403,'forbidden');}function rid(array$u,array$d):int{if($u['role']!=='platform_admin')return(int)$u['restaurant_id'];$id=num($d,'restaurant_id');if(!one('SELECT id FROM restaurants WHERE id=?',[$id]))fail(422,'validation');return$id;}function owns(string$table,int$id,array$u):array{if(!in_array($table,['restaurants','categories','items','dining_tables','orders','service_requests','screens','signage_content'],true))throw new RuntimeException('table');$r=one("SELECT * FROM $table WHERE id=?",[$id]);$restaurant=$table==='restaurants'?$r['id']??0:$r['restaurant_id']??0;if(!$r||($u['role']!=='platform_admin'&&(int)$restaurant!==(int)$u['restaurant_id']))fail(404,'not_found');return$r;}
 function open_restaurant(string $slug):?array{$r=one('SELECT * FROM restaurants WHERE slug=?',[$slug]);if(!$r||!in_array($r['subscription_status'],['trial','active'],true)||$r['subscription_end']<date('Y-m-d'))return null;return$r;}
+function subscribed(array $r):bool{return in_array($r['subscription_status'],['trial','active'],true)&&$r['subscription_end']>=date('Y-m-d');}
+
+// Shared by customer and staff ordering: prices, names and allergens always come from the database, never the client.
+function place_order(array $r,array $d,?array $table,string $type,string $pay,string $status,?int $by,bool $paid=false):array{
+ $lines=$d['items']??null;if(!is_array($lines)||!count($lines)||count($lines)>50)fail(422,'validation');$allergies=$d['allergies']??[];if(!is_array($allergies)||count($allergies)>14)fail(422,'validation');foreach($allergies as$x)if(!is_string($x)||!in_array($x,ALLERGENS,true))fail(422,'validation');$allergies=array_values(array_unique($allergies));
+ $clean=[];$sub=0;foreach($lines as$l){if(!is_array($l))fail(422,'validation');$iid=num($l,'item_id');$qty=num($l,'quantity');if($qty>20)fail(422,'validation');$it=one('SELECT i.* FROM items i JOIN categories c ON c.id=i.category_id AND c.active=1 WHERE i.id=? AND i.restaurant_id=? AND i.available=1',[$iid,$r['id']]);if(!$it)fail(409,'unavailable_item');$sub+=(int)$it['price']*$qty;$clean[]=[$it,$qty,text($l,'guest_name',80,false),text($l,'note',500,false)];}
+ if($sub>20000000)fail(422,'validation');$tax=intdiv($sub*(int)$r['tax_rate']+5000,10000);$service=intdiv($sub*(int)$r['service_rate']+5000,10000);
+ $guests=min(30,num($d,'guest_count'));$name=text($d,'customer_name',100,false);$note=text($d,'customer_note',1000,false);
+ $public=strtoupper(bin2hex(random_bytes(4)));$token=bin2hex(random_bytes(24));$now=time();
+ db()->beginTransaction();q('INSERT INTO orders(public_id,status_token,restaurant_id,table_id,order_type,guest_count,customer_name,customer_note,allergies,status,payment_method,payment_status,subtotal,tax,service,total,created_by,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',[$public,$token,$r['id'],$table['id']??null,$type,$guests,$name,$note,json_encode($allergies),$status,$pay,$paid?'paid':'pending',$sub,$tax,$service,$sub+$tax+$service,$by,$now,$now]);$oid=(int)db()->lastInsertId();foreach($clean as[$it,$qty,$guest,$lnote])q('INSERT INTO order_items(order_id,item_id,item_name,unit_price,quantity,guest_name,note,allergens)VALUES(?,?,?,?,?,?,?,?)',[$oid,$it['id'],$it['name_fr'],$it['price'],$qty,$guest,$lnote,$it['allergens']]);db()->commit();
+ return['id'=>$oid,'public_id'=>$public,'status_token'=>$token,'total'=>$sub+$tax+$service,'currency'=>$r['currency']];
+}
+// Six-digit pairing code for a signage screen; unique while it is waiting to be used.
+function new_pin():string{for($i=0;$i<50;$i++){$p=str_pad((string)random_int(0,999999),6,'0',STR_PAD_LEFT);if(!one('SELECT id FROM screens WHERE pin=?',[$p]))return$p;}throw new RuntimeException('pin');}
+function langs(array $r):array{$l=json_decode((string)$r['languages'],true);$l=is_array($l)?array_values(array_intersect(LANGS,$l)):[];return$l?:['fr'];}
